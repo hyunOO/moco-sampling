@@ -69,42 +69,89 @@ def sort_loss(moco_model, data_loader, sample_size, descending=True):
     return index_list
 
 
-def sort_loss_sequential(moco_model, dataset, sample_size):
+def sort_loss_sequential(moco_model, data_loader, sample_size):
+
+    def contrastive_loss(im_q, im_k, negative):
+        # compute query features
+        q = moco_model.encoder_q(im_q)  # queries: NxC
+        q = nn.functional.normalize(q, dim=1)  # already normalized
+
+        k = moco_model.encoder_k(im_k)  # keys: NxC
+        k = nn.functional.normalize(k, dim=1)
+
+        neg = moco_model.encoder_k(negative)  # keys: NxC
+        neg = nn.functional.normalize(neg, dim=1)
+
+        # compute logits
+        # Einstein sum is more intuitive
+        # positive logits: Nx1
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        # negative logits: NxK
+        l_neg = torch.einsum('nc,kc->nk', [q, neg])
+
+        # logits: Nx(1+K)
+        logits = torch.cat([l_pos, l_neg], dim=1)
+        # apply temperature
+        logits /= moco_model.T
+        # labels: positive key indicators
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+
+        loss_list = []
+        for i in range(labels.size(0)):
+            logit = torch.unsqueeze(logits[i], 0)
+            label = torch.unsqueeze(labels[i], 0)
+            loss = nn.CrossEntropyLoss().cuda()(logit, label)
+            loss_list.append(loss.item())
+
+        return loss_list
+
     index_list = []
-    loss_list = [0 for i in range(len(dataset))]
+    # loss_list = [0 for i in range(len(data_loader.dataset))]
+
+    new_index = 0
+    losses = None
 
     while len(index_list) < sample_size:
         print('index_list: ', index_list)
         if len(index_list) == 0:
-            index = random.choice([i for i in range(len(dataset))])
+            index = random.choice([i for i in range(len(data_loader.dataset))])
             index_list.append(index)
+            new_index = index
         else:
             start_time = timer()
-            max_index = 0
-            max_contrastive_loss = 0
+            # max_index = 0
+            # max_contrastive_loss = 0
+            contrastive_loss_list = []
 
-            for i in range(len(dataset)):
-                if i in index_list:
+            for _, (im_q, im_k) in enumerate(data_loader):
+                # im_q = torch.unsqueeze(im_q, 0)
+                im_q = im_q.cuda()
+                im_k = im_k.cuda()
+                negative = data_loader.dataset[new_index][0]
+                negative = torch.unsqueeze(negative, 0)
+                negative = negative.cuda()
+                c_loss = contrastive_loss(im_q, im_k, negative)
+                contrastive_loss_list.extend(c_loss)
+
+            contrastive_loss_list = torch.tensor(contrastive_loss_list)
+            if losses is None:
+                losses = contrastive_loss_list.cpu()
+            else:
+                losses += contrastive_loss_list.cpu()
+            print('losses shape: ', losses.shape)
+
+            sort_index = torch.argsort(losses, descending=True)
+            for index in sort_index:
+                index_int = int(index)
+                if index_int in index_list:
                     continue
                 else:
-                    im_q = dataset[i][0]
-                    im_q = torch.unsqueeze(im_q, 0)
-                    im_q = im_q.cuda()
-                    contrastive_loss = loss_list[i]
+                    index_list.append(index_int)
+                    new_index = index_int
+                    break
 
-                    im_k = dataset[index_list[-1]][0]
-                    im_k = torch.unsqueeze(im_k, 0)
-                    im_k = im_k.cuda()
-                    contrastive_loss += moco_model.contrastive_loss(im_q, im_k)[0].item()
-                    loss_list[i] = contrastive_loss
-
-                    if max_contrastive_loss < contrastive_loss:
-                        max_contrastive_loss = contrastive_loss
-                        max_index = i
             end_time = timer()
             print(f'Elapsed time: {end_time - start_time}s')
-
-            index_list.append(max_index)
 
     return index_list
 
