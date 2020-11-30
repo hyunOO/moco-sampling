@@ -70,30 +70,14 @@ def sort_loss(moco_model, data_loader, sample_size, descending=True):
 
 
 def sort_loss_sequential(moco_model, data_loader, sample_size):
+    moco_model.eval()
 
     def contrastive_loss(im_q, im_k, negative):
-        # compute query features
-        q = moco_model.encoder_q(im_q)  # queries: NxC
-        q = nn.functional.normalize(q, dim=1)  # already normalized
-
-        k = moco_model.encoder_k(im_k)  # keys: NxC
-        k = nn.functional.normalize(k, dim=1)
-
-        neg = moco_model.encoder_k(negative)  # keys: NxC
-        neg = nn.functional.normalize(neg, dim=1)
-
-        # compute logits
-        # Einstein sum is more intuitive
-        # positive logits: Nx1
         l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
-        # negative logits: NxK
         l_neg = torch.einsum('nc,kc->nk', [q, neg])
 
-        # logits: Nx(1+K)
         logits = torch.cat([l_pos, l_neg], dim=1)
-        # apply temperature
         logits /= moco_model.T
-        # labels: positive key indicators
         labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
 
         loss_list = []
@@ -106,21 +90,54 @@ def sort_loss_sequential(moco_model, data_loader, sample_size):
         return loss_list
 
     index_list = []
-
-    new_index = 0
-    losses = None
     im_q_list = []
     im_k_list = []
     negatives = []
-    total_losses = [0 for i in range(len(data_loader.dataset))]
 
     with torch.no_grad():
         while len(index_list) < sample_size:
             print(f'index_list: {index_list}, {len(index_list)}')
             if len(index_list) == 0:
-                index = random.choice([i for i in range(len(data_loader.dataset))])
+                # index = random.choice([i for i in range(len(data_loader.dataset))])
+                # index_list.append(index)
+
+                l_pos_list = []
+
+                for _, (im_q, im_k) in enumerate(data_loader):
+                    # im_q = torch.unsqueeze(im_q, 0)
+                    with torch.no_grad():
+                        im_q = im_q.cuda()
+                        im_k = im_k.cuda()
+
+                        # compute query features
+                        q = moco_model.encoder_q(im_q)  # queries: NxC
+                        q = nn.functional.normalize(q, dim=1)  # already normalized
+                        im_k_, idx_unshuffle = moco_model._batch_shuffle_single_gpu(im_k)
+                        k = moco_model.encoder_k(im_k_)  # keys: NxC
+                        k = nn.functional.normalize(k, dim=1)
+                        k = moco_model._batch_unshuffle_single_gpu(k, idx_unshuffle)
+
+                        im_q_list.append(q.clone().cpu())
+                        im_k_list.append(k.clone().cpu())
+
+                        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+                        # iter_l_pos_list = torch.split(l_pos, l_pos.size(0))
+                        for i in range(l_pos.size(0)):
+                            l_pos_list.append(float(l_pos[i].cpu()))
+                        # print('l_pos_list: ', l_pos_list)
+
+                        del q, k
+
+                # print('len l_pos_list: ', len(l_pos_list))
+                assert len(l_pos_list) == len(data_loader.dataset)
+
+                index = 0
+                minimum = 1e8
+                for idx in range(len(l_pos_list)):
+                    if l_pos_list[idx] < minimum:
+                        index = idx
+                        minimum = l_pos_list[idx]
                 index_list.append(index)
-                new_index = index
 
                 neg = moco_model.encoder_k(torch.unsqueeze(data_loader.dataset[index][0], 0).cuda())
                 neg = nn.functional.normalize(neg, dim=1)
@@ -129,82 +146,27 @@ def sort_loss_sequential(moco_model, data_loader, sample_size):
 
             else:
                 start_time = timer()
-                # max_index = 0
-                # max_contrastive_loss = 0
 
-                
                 contrastive_loss_list = []
-                '''
-                print('new_index: ', new_index)
-                negative = data_loader.dataset[new_index][0]
-                negative = torch.unsqueeze(negative, 0)
-                negative = negative.cuda()
-                neg = moco_model.encoder_k(negative)  # keys: NxC
-                neg = nn.functional.normalize(neg, dim=1)
-                '''
-
                 negative = torch.stack(negatives)
                 neg = negative.cuda()
-                '''
-                if neg.dim() == 3:
-                    neg = torch.unsqueeze(neg, 0)
-                '''
-                print('neg shape: ', neg.shape)
 
-                if len(index_list) == 1:
-                    for _, (im_q, im_k) in enumerate(data_loader):
-                        # im_q = torch.unsqueeze(im_q, 0)
-                        with torch.no_grad():
-                            im_q = im_q.cuda()
-                            im_k = im_k.cuda()
+                for l in range(len(im_q_list)):
+                    q = im_q_list[l]
+                    k = im_k_list[l]
+                    q = q.cuda()
+                    k = k.cuda()
 
-                            # compute query features
-                            q = moco_model.encoder_q(im_q)  # queries: NxC
-                            q = nn.functional.normalize(q, dim=1)  # already normalized
-                            im_k_, idx_unshuffle = moco_model._batch_shuffle_single_gpu(im_k)
-                            k = moco_model.encoder_k(im_k_)  # keys: NxC
-                            k = nn.functional.normalize(k, dim=1)
-                            k = moco_model._batch_unshuffle_single_gpu(k, idx_unshuffle)
+                    c_loss = contrastive_loss(q, k, neg)
+                    contrastive_loss_list.extend(c_loss)
 
-                            c_loss = contrastive_loss(q, k, neg)
-                            contrastive_loss_list.extend(c_loss)
-
-                            im_q_list.append(q.clone().cpu())
-                            im_k_list.append(k.clone().cpu())
-
-                            del q, k
-
-                else:
-                    for l in range(len(im_q_list)):
-                        q = im_q_list[l]
-                        k = im_k_list[l]
-                        q = q.cuda()
-                        k = k.cuda()
-
-                        c_loss = contrastive_loss(q, k, neg)
-                        contrastive_loss_list.extend(c_loss)
-                '''
-                contrastive_loss_list = torch.tensor(contrastive_loss_list)
-                if losses is None:
-                    losses = contrastive_loss_list.cpu()
-                else:
-                    losses += contrastive_loss_list.cpu()
-                
-                assert len(losses) == len(total_losses)
-                total_ = [total_losses[i] + losses[i] for i in range(len(total_losses))]
-                total_losses = total_
-
-                sort_index = torch.argsort(torch.tensor(total_losses), descending=True)
-                '''
-                # print('len contrastive_loss_list: ', len(contrastive_loss_list))
                 sort_index = torch.argsort(torch.tensor(contrastive_loss_list), descending=True)
-                for index in sort_index:
-                    index_int = int(index)
+                for idx in sort_index:
+                    index_int = int(idx)
                     if index_int in index_list:
                         continue
                     else:
                         index_list.append(index_int)
-                        new_index = index_int
 
                         neg = moco_model.encoder_k(torch.unsqueeze(data_loader.dataset[index_int][0], 0).cuda())
                         neg = nn.functional.normalize(neg, dim=1)
@@ -215,6 +177,8 @@ def sort_loss_sequential(moco_model, data_loader, sample_size):
 
                 end_time = timer()
                 print(f'Elapsed time: {end_time - start_time}s')
+
+    moco_model.train()
 
     return index_list
 

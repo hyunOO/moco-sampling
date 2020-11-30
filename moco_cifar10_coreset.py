@@ -300,11 +300,14 @@ if __name__ == '__main__':
                         select_dataset, batch_size=500, shuffle=False,
                         num_workers=16, pin_memory=True)
 
+                    '''
                     new_moco_model = ModelMoCo(
                         dim=args.moco_dim, K=args.moco_k, m=args.moco_m, T=args.moco_t,
                         arch=args.arch, bn_splits=args.bn_splits, symmetric=args.symmetric).cuda()
                     new_moco_model.load_state_dict(torch.load('./model_last.pth')['state_dict'])
                     index = sort_loss_sequential(new_moco_model, select_loader, desire_len)
+                    '''
+                    index = sort_loss_sequential(model, select_loader, desire_len)
 
                     with open(os.path.join(f'./{args.sample_method}_ratio_{args.data_ratio}.txt'), 'w') as f:
                         f.write(str(index))
@@ -316,7 +319,7 @@ if __name__ == '__main__':
                     change_dataset, batch_size=args.batch_size, shuffle=False,
                     num_workers=16, pin_memory=True, drop_last=True, sampler=sampler)
 
-                del new_moco_model
+                # del new_moco_model
 
             else:
                 raise NotImplementedError
