@@ -106,52 +106,115 @@ def sort_loss_sequential(moco_model, data_loader, sample_size):
         return loss_list
 
     index_list = []
-    # loss_list = [0 for i in range(len(data_loader.dataset))]
 
     new_index = 0
     losses = None
+    im_q_list = []
+    im_k_list = []
+    negatives = []
+    total_losses = [0 for i in range(len(data_loader.dataset))]
 
-    while len(index_list) < sample_size:
-        print('index_list: ', index_list)
-        if len(index_list) == 0:
-            index = random.choice([i for i in range(len(data_loader.dataset))])
-            index_list.append(index)
-            new_index = index
-        else:
-            start_time = timer()
-            # max_index = 0
-            # max_contrastive_loss = 0
-            contrastive_loss_list = []
+    with torch.no_grad():
+        while len(index_list) < sample_size:
+            print(f'index_list: {index_list}, {len(index_list)}')
+            if len(index_list) == 0:
+                index = random.choice([i for i in range(len(data_loader.dataset))])
+                index_list.append(index)
+                new_index = index
 
-            for _, (im_q, im_k) in enumerate(data_loader):
-                # im_q = torch.unsqueeze(im_q, 0)
-                im_q = im_q.cuda()
-                im_k = im_k.cuda()
+                neg = moco_model.encoder_k(torch.unsqueeze(data_loader.dataset[index][0], 0).cuda())
+                neg = nn.functional.normalize(neg, dim=1)
+                neg = torch.squeeze(neg, 0)
+                negatives.append(neg.cpu())
+
+            else:
+                start_time = timer()
+                # max_index = 0
+                # max_contrastive_loss = 0
+
+                
+                contrastive_loss_list = []
+                '''
+                print('new_index: ', new_index)
                 negative = data_loader.dataset[new_index][0]
                 negative = torch.unsqueeze(negative, 0)
                 negative = negative.cuda()
-                c_loss = contrastive_loss(im_q, im_k, negative)
-                contrastive_loss_list.extend(c_loss)
+                neg = moco_model.encoder_k(negative)  # keys: NxC
+                neg = nn.functional.normalize(neg, dim=1)
+                '''
 
-            contrastive_loss_list = torch.tensor(contrastive_loss_list)
-            if losses is None:
-                losses = contrastive_loss_list.cpu()
-            else:
-                losses += contrastive_loss_list.cpu()
-            print('losses shape: ', losses.shape)
+                negative = torch.stack(negatives)
+                neg = negative.cuda()
+                '''
+                if neg.dim() == 3:
+                    neg = torch.unsqueeze(neg, 0)
+                '''
+                print('neg shape: ', neg.shape)
 
-            sort_index = torch.argsort(losses, descending=True)
-            for index in sort_index:
-                index_int = int(index)
-                if index_int in index_list:
-                    continue
+                if len(index_list) == 1:
+                    for _, (im_q, im_k) in enumerate(data_loader):
+                        # im_q = torch.unsqueeze(im_q, 0)
+                        with torch.no_grad():
+                            im_q = im_q.cuda()
+                            im_k = im_k.cuda()
+
+                            # compute query features
+                            q = moco_model.encoder_q(im_q)  # queries: NxC
+                            q = nn.functional.normalize(q, dim=1)  # already normalized
+                            im_k_, idx_unshuffle = moco_model._batch_shuffle_single_gpu(im_k)
+                            k = moco_model.encoder_k(im_k_)  # keys: NxC
+                            k = nn.functional.normalize(k, dim=1)
+                            k = moco_model._batch_unshuffle_single_gpu(k, idx_unshuffle)
+
+                            c_loss = contrastive_loss(q, k, neg)
+                            contrastive_loss_list.extend(c_loss)
+
+                            im_q_list.append(q.clone().cpu())
+                            im_k_list.append(k.clone().cpu())
+
+                            del q, k
+
                 else:
-                    index_list.append(index_int)
-                    new_index = index_int
-                    break
+                    for l in range(len(im_q_list)):
+                        q = im_q_list[l]
+                        k = im_k_list[l]
+                        q = q.cuda()
+                        k = k.cuda()
 
-            end_time = timer()
-            print(f'Elapsed time: {end_time - start_time}s')
+                        c_loss = contrastive_loss(q, k, neg)
+                        contrastive_loss_list.extend(c_loss)
+                '''
+                contrastive_loss_list = torch.tensor(contrastive_loss_list)
+                if losses is None:
+                    losses = contrastive_loss_list.cpu()
+                else:
+                    losses += contrastive_loss_list.cpu()
+                
+                assert len(losses) == len(total_losses)
+                total_ = [total_losses[i] + losses[i] for i in range(len(total_losses))]
+                total_losses = total_
+
+                sort_index = torch.argsort(torch.tensor(total_losses), descending=True)
+                '''
+                # print('len contrastive_loss_list: ', len(contrastive_loss_list))
+                sort_index = torch.argsort(torch.tensor(contrastive_loss_list), descending=True)
+                for index in sort_index:
+                    index_int = int(index)
+                    if index_int in index_list:
+                        continue
+                    else:
+                        index_list.append(index_int)
+                        new_index = index_int
+
+                        neg = moco_model.encoder_k(torch.unsqueeze(data_loader.dataset[index_int][0], 0).cuda())
+                        neg = nn.functional.normalize(neg, dim=1)
+                        neg = torch.squeeze(neg, 0)
+                        negatives.append(neg.cpu())
+
+                        break
+
+                end_time = timer()
+                print(f'Elapsed time: {end_time - start_time}s')
 
     return index_list
 

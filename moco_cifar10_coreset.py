@@ -281,22 +281,33 @@ if __name__ == '__main__':
 
             elif args.sample_method == 'loss_sort_sequential':
                 print('Sampling method is [loss_sort_sequential!]')
-                select_dataset = CIFAR10Pair(
-                    root='data', train=True,
-                    transform=test_transform, download=True)
-                desire_len = int(len(select_dataset) * args.data_ratio)
-                select_loader = DataLoader(
-                    select_dataset, batch_size=1250, shuffle=False,
-                    num_workers=16, pin_memory=True)
 
-                new_moco_model = ModelMoCo(
-                    dim=args.moco_dim, K=args.moco_k, m=args.moco_m, T=args.moco_t,
-                    arch=args.arch,bn_splits=1, symmetric=args.symmetric).cuda()
-                new_moco_model.load_state_dict(torch.load('./model_last.pth')['state_dict'])
-                index = sort_loss_sequential(new_moco_model, select_loader, desire_len)
+                index_file_name = f'./{args.sample_method}_ratio_{args.data_ratio}.txt'
+                if os.path.exists(index_file_name):
+                    f = open(index_file_name, 'r')
+                    lines = f.readlines()
+                    string = ','
+                    for line in lines:
+                        string += line.replace('\n', '').replace('[', '').replace(']', '')
+                    index = string.split(',')
 
-                with open(os.path.join(args.results_dir, 'index.txt'), 'w') as f:
-                    f.write(index)
+                else:
+                    select_dataset = CIFAR10Pair(
+                        root='data', train=True,
+                        transform=test_transform, download=True)
+                    desire_len = int(len(select_dataset) * args.data_ratio)
+                    select_loader = DataLoader(
+                        select_dataset, batch_size=500, shuffle=False,
+                        num_workers=16, pin_memory=True)
+
+                    new_moco_model = ModelMoCo(
+                        dim=args.moco_dim, K=args.moco_k, m=args.moco_m, T=args.moco_t,
+                        arch=args.arch, bn_splits=args.bn_splits, symmetric=args.symmetric).cuda()
+                    new_moco_model.load_state_dict(torch.load('./model_last.pth')['state_dict'])
+                    index = sort_loss_sequential(new_moco_model, select_loader, desire_len)
+
+                    with open(os.path.join(f'./{args.sample_method}_ratio_{args.data_ratio}.txt'), 'w') as f:
+                        f.write(str(index))
 
                 change_dataset = CIFAR10Pair(
                     root='./data', train=True, transform=train_transform, download=True)
